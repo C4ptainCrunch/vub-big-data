@@ -1,6 +1,6 @@
 import java.nio.file.{Files, Paths}
 
-import org.apache.spark.sql.{Dataset, SparkSession}
+import org.apache.spark.sql.SparkSession
 import org.apache.spark.{SparkConf, SparkContext}
 
 case class RawTweet(id: BigInt,
@@ -15,39 +15,63 @@ case class Tweet(id: BigInt,
                  hashTags: Array[String],
                  likes: Int)
 
-
+case class Settings(cache_path: String,
+                    data_path: String,
+                    set_master: Boolean,
+                    use_cache: Boolean)
 
 object Twitter {
-  def main(args: Array[String]): Unit = {
 
-    val EPS = 1
+  def get_config(): Settings = {
+    val use_cache = true
+    if(scala.util.Properties.envOrElse("DEV", "0") == "1") {
+      println("Running in dev/standalone mode")
+      val root = "/home/nikita/Documents/Vub/2017-2018/BC/bd-project/"
+      Settings(
+        cache_path = root + "tag_likes.data/",
+        data_path =  root + "reducedTweetsRaw/",
+        set_master = true,
+        use_cache = use_cache
+      )
+    } else {
+      println("Running in cluster mode")
+      Settings(
+        cache_path = "/exports/home/nimarcha/tag_likes.data/",
+        data_path = "/data/twitter/tweetsraw",
+        set_master = false,
+        use_cache = use_cache
+      )
+    }
+  }
+
+  val EPS = 1
+  val MAX_ITER = 100
+  val APP_NAME = "Twitter Nikita"
+
+
+  def main(args: Array[String]): Unit = {
+    val config = get_config()
 
     val conf = new SparkConf()
-    conf.setAppName("Twitter Nikita")
-//    conf.setMaster("local[3]")
+    conf.setAppName(APP_NAME)
+    if (config.set_master) {
+      conf.setMaster("local[*]")
+    }
     val sc = new SparkContext(conf)
-    val cache_path = "/exports/home/nimarcha/tag_likes.data/"
-    println(sc)
+    val cache_path = config.cache_path
 
-    val spark = SparkSession.builder.appName("Simple Application").getOrCreate()
+    val spark = SparkSession.builder.appName(APP_NAME).getOrCreate()
     spark.sparkContext.setLogLevel("ERROR")
     import spark.implicits._
 
-    val t0 = System.nanoTime()
-
-//    val path = "tweets"
-//    val path = "/home/nikita/reducedTweetsRaw/"
-//    val path = "/data/twitter/reducedTweetsRaw/"
-    val path = "/data/twitter/tweetsraw"
-
     val tag_likes =
-      if (Files.exists(Paths.get(cache_path))){
-        println("Loading cacheed data")
+      if (Files.exists(Paths.get(cache_path)) && config.use_cache){
+        println("Loading cached data")
         sc.objectFile[(String, Int)](cache_path)
       }
       else {
         println("Computing data")
-        val raw = spark.read.json(path)
+        val raw = spark.read.json(config.data_path)
 
         val raw_tweets = raw.selectExpr(
           "id",
@@ -102,8 +126,6 @@ object Twitter {
       println
     })
 
-    val t1 = System.nanoTime()
-    println("Elapsed time: " + (t1 - t0)*10e-9 + "s")
 
 //    Extract the tweets that have a trending hashtag
     val trending_set = trending.toSet
@@ -125,7 +147,7 @@ object Twitter {
 
     var cluster_distance = 2 * EPS
 
-    for (i <- 1 to 100; if cluster_distance > EPS) {
+    for (i <- 1 to MAX_ITER; if cluster_distance > EPS) {
   //    Assign a cluster to each tweet
       var clustered_tweets = trending_tweets.map({ case (tag, likes) => {
         val tag_clusters = clusters.get(tag) match {
