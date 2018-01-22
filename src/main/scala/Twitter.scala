@@ -101,9 +101,6 @@ object Twitter {
   }
 
   def partitionedGetTrending(unique_tag_likes: RDD[(HashTag, LikesCount)]): Array[HashTag] = {
-    println("---------")
-    println(unique_tag_likes.partitions.size)
-    println(unique_tag_likes.count())
 
     val pre_filtered = unique_tag_likes
       .mapPartitions(partition => {
@@ -111,16 +108,21 @@ object Twitter {
         // We should not use a list as we have to sort it every time
         // something like https://docs.python.org/3.6/library/bisect.html
         // would be better
-        partition.foldLeft(List[(HashTag, LikesCount)]()){(l, n) => {
+        partition.foldLeft(List[(HashTag, LikesCount)]()) { (l, n) => {
           (n :: l).sortWith(_._2 > _._2).take(TOPN)
-        }}.iterator
+        }
+        }.iterator
       })
-    println("---------")
-    println(pre_filtered.partitions.size)
-    println(pre_filtered.count())
+
     pre_filtered
       .sortBy({ case (_, likes) => likes }, ascending = false)
       .take(TOPN)
+      .map({ case (tag, _) => tag })
+  }
+
+  def stdlibGetTrending(unique_tag_likes: RDD[(HashTag, LikesCount)]): Array[HashTag] = {
+    unique_tag_likes
+      .top(TOPN)(Ordering.by[(HashTag, LikesCount), LikesCount](_._2))
       .map({ case (tag, _) => tag })
   }
 
@@ -155,7 +157,7 @@ object Twitter {
         (tweet: Tweet) => {
           tweet.hashTags.map((tag: HashTag) => (tag, tweet.likes))
         }
-      ).rdd.persist()
+      ).rdd
 
       if(config.use_cache) {
         val path: Path = Path (config.cache_path)
@@ -203,8 +205,9 @@ object Twitter {
 
 
     val tag_likes: RDD[(HashTag, LikesCount)] = getHashtagsLikes(sc, spark, config)
+      .persist()
     val unique_tag_likes: RDD[(HashTag, LikesCount)] = tag_likes.reduceByKey(_ + _)
-    val trending: Array[HashTag] = partitionedGetTrending(unique_tag_likes)
+    val trending: Array[HashTag] = stdlibGetTrending(unique_tag_likes)
 
     println("Trending tags: " + trending.mkString(","))
 
