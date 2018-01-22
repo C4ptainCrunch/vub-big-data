@@ -58,7 +58,7 @@ object Twitter {
     }
   }
 
-  val EPS = 1
+  val EPS = 100
   val K = 5
   val MAX_ITER = 100
   val APP_NAME = "Twitter Nikita"
@@ -222,7 +222,7 @@ object Twitter {
     println(trending_tweets.count())
 
     // Initialize the clusters with sampled values
-    var clusters: Map[HashTag, Array[ClusterCenter]] = getInitialClusters(trending_set, trending_tweets)
+    var clusters: collection.Map[HashTag, Array[ClusterCenter]] = getInitialClusters(trending_set, trending_tweets)
 
     // Make a big cluster_distance so we enter the loop
     var cluster_distance = 2 * EPS
@@ -244,20 +244,22 @@ object Twitter {
         }})
 
       // Get back the new clusters
-      val clusters_with_ixd: Array[((HashTag, ClusterIndex), ClusterCenter)] = clustered_tweets
+      val clusters_with_ixd: RDD[((HashTag, ClusterIndex), ClusterCenter)] = clustered_tweets
         .mapValues(value => (value, 1))
         .reduceByKey {
           case ((sumL, countL), (sumR, countR)) =>
             (sumL + sumR, countL + countR)
-        }.mapValues {
+        }.repartition(1) // we have only 100 values (5 clusters * 20 hashtags)
+        .mapValues {
           case (sum, count) => sum / count
-        }.collect()
+        }
 
-      val new_clusters: Map[HashTag, Array[ClusterCenter]] = clusters_with_ixd
-        .map({ case ((tag, _), center) => {(tag, center)}})
-        .groupBy({ case (tag, _) => tag }) // group by hashtag
-        .mapValues((array) => array.map({ case (_, likes) => likes }).sorted) // keep only a list of centers
-        .map(identity) // mapValues can not be serialized
+      val new_clusters: collection.Map[HashTag, Array[ClusterCenter]] = clusters_with_ixd
+        .map({ case ((tag, _), center) => {(tag, center)}}) // remove cluster index
+        .repartition(1) // we have only 100 values (5 clusters * 20 hashtags)
+        .groupByKey() // group by hashtag
+        .mapValues((centers) => centers.toArray.sorted) // order clusters
+        .collectAsMap()
 
       cluster_distance = clusters.
         map({ case (tag, old_centers) => {
@@ -270,7 +272,7 @@ object Twitter {
         }})
         .sum
 
-      if(i % 10 == 0 || cluster_distance <= EPS){
+      if(i % 10 == 1 || cluster_distance <= EPS){
         print("Iteration ")
         print(i)
         print(" distance ")
