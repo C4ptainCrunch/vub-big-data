@@ -2,3 +2,4 @@ tag_likes.data/
 target/
 spark-warehouse
 reducedTweetsRaw/
+tag_likes.data.small

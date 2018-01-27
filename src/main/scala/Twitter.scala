@@ -244,22 +244,26 @@ object Twitter {
         }})
 
       // Get back the new clusters
-      val clusters_with_ixd: RDD[((HashTag, ClusterIndex), ClusterCenter)] = clustered_tweets
+      val ungrouped_clusters: Array[(HashTag, ClusterCenter)] = clustered_tweets
         .mapValues(value => (value, 1))
         .reduceByKey {
           case ((sumL, countL), (sumR, countR)) =>
             (sumL + sumR, countL + countR)
-        }.repartition(1) // we have only 100 values (5 clusters * 20 hashtags)
-        .mapValues {
-          case (sum, count) => sum / count
-        }
+        }.collect // we have only 100 values (5 clusters * 20 hashtags)
+        .map({ // remove cluster index and compute mean likes
+          case ((tag, _), (sum, count)) => (tag, sum / count)
+        })
 
-      val new_clusters: collection.Map[HashTag, Array[ClusterCenter]] = clusters_with_ixd
-        .map({ case ((tag, _), center) => {(tag, center)}}) // remove cluster index
-        .repartition(1) // we have only 100 values (5 clusters * 20 hashtags)
-        .groupByKey() // group by hashtag
-        .mapValues((centers) => centers.toArray.sorted) // order clusters
-        .collectAsMap()
+      val new_clusters: Map[HashTag, Array[ClusterCenter]] = ungrouped_clusters
+        .groupBy({ // transform Array[(Tag, Center)] to Array[Center]
+          case (tag, _) => tag
+        })
+        .mapValues((array) => array.map({case (_, center) => center}))
+        .mapValues((centers) => centers.sorted)
+        // mapValues is not serializable, so we map it with identity it to
+        // make it serializable (see https://stackoverflow.com/a/32910318)
+        .map(identity)
+
 
       cluster_distance = clusters.
         map({ case (tag, old_centers) => {
