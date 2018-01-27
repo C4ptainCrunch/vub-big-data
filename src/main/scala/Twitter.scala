@@ -1,13 +1,11 @@
 import java.nio.file.{Files, Paths}
 
-import org.apache.spark
 import org.apache.spark.rdd.RDD
-import org.apache.spark.sql.catalyst.plans.logical.Sort
 import org.apache.spark.sql.{DataFrame, Dataset, SparkSession}
 import org.apache.spark.{SparkConf, SparkContext}
 
 import scala.reflect.io.Path
-import scala.util.{Sorting, Try}
+import scala.util.Try
 
 case class RawTweet(id: BigInt,
                     text: String,
@@ -33,6 +31,7 @@ object Twitter {
   type LikesCount = Int
   type ClusterCenter = Int
   type ClusterIndex = Int
+  type TweetCount = Int
 
 
   def get_config(): Settings = {
@@ -79,17 +78,21 @@ object Twitter {
 
     val raw: DataFrame = spark.read.json(data_path)
 
-    val raw_tweets: Dataset[RawTweet] = raw.selectExpr(
-      "id",
-      "text",
-      "entities.hashtags.text as hashtags",
-      "retweeted_status.favorite_count as retweet_fav_count",
-      "user.favourites_count as user_fav_count",
-      "user.statuses_count"
-    )
+    val raw_tweets: Dataset[RawTweet] = raw
+      // Select only useful fields
+      .selectExpr(
+        "id",
+        "text",
+        "entities.hashtags.text as hashtags",
+        "retweeted_status.favorite_count as retweet_fav_count",
+        "user.favourites_count as user_fav_count",
+        "user.statuses_count"
+      )
+      // Only keep tweets and not other actions (user likes, ...)
       .where("id is not null")
       .as[RawTweet]
 
+    // convert to Tweet (mostly an heuristic for the # of likes)
     raw_tweets.map(raw_to_tweet)
   }
 
@@ -101,8 +104,7 @@ object Twitter {
   }
 
   def partitionedGetTrending(unique_tag_likes: RDD[(HashTag, LikesCount)]): Array[HashTag] = {
-
-    val pre_filtered = unique_tag_likes
+    unique_tag_likes
       .mapPartitions(partition => {
         // Inspired from https://stackoverflow.com/a/5675204
         // We should not use a list as we have to sort it every time
@@ -113,8 +115,6 @@ object Twitter {
         }
         }.iterator
       })
-
-    pre_filtered
       .sortBy({ case (_, likes) => likes }, ascending = false)
       .take(TOPN)
       .map({ case (tag, _) => tag })
@@ -127,9 +127,9 @@ object Twitter {
   }
 
   def fastGetTrending(unique_tag_likes: RDD[(HashTag, LikesCount)]): Array[HashTag] = {
-    //    Sort faster by removing the most insignificant hashtags first
-    //    We take 100 random hashtags and take the minimum like count. This like count is
-    //    obviously > than the like count of the 20th trending hashtag
+    // Sort faster by removing the most insignificant hashtags first
+    // We take 100 random hashtags and take the minimum like count. This like count is
+    // obviously > than the like count of the 20th trending hashtag
     val lower_bound: LikesCount = unique_tag_likes.takeSample(withReplacement = false, num = 100)
       .map(pair => pair._2)
       .sorted
@@ -200,8 +200,7 @@ object Twitter {
     val cache_path = config.cache_path
 
     val spark = SparkSession.builder.appName(APP_NAME).getOrCreate()
-    spark.sparkContext.setLogLevel("ERROR")
-    import spark.implicits._ // Needed to serialize case classes
+    spark.sparkContext.setLogLevel("ERROR") // Needed to serialize case classes
 
 
     val tag_likes: RDD[(HashTag, LikesCount)] = getHashtagsLikes(sc, spark, config)
@@ -224,7 +223,9 @@ object Twitter {
     // Initialize the clusters with sampled values
     var clusters: collection.Map[HashTag, Array[ClusterCenter]] = getInitialClusters(trending_set, trending_tweets)
 
-    // Make a big cluster_distance so we enter the loop
+    var cluster_sizes: collection.Map[HashTag, Array[Int]] = collection.Map()
+
+    // Make a big cluster_distance so we enter the  at least once
     var cluster_distance = 2 * EPS
 
     for (i <- 1 to MAX_ITER; if cluster_distance > EPS) {
@@ -244,24 +245,38 @@ object Twitter {
         }})
 
       // Get back the new clusters
-      val ungrouped_clusters: Array[(HashTag, ClusterCenter)] = clustered_tweets
+      val ungrouped_clusters: Array[(HashTag, (Int, Int))] = clustered_tweets
         .mapValues(value => (value, 1))
         .reduceByKey {
           case ((sumL, countL), (sumR, countR)) =>
             (sumL + sumR, countL + countR)
         }.collect // we have only 100 values (5 clusters * 20 hashtags)
-        .map({ // remove cluster index and compute mean likes
-          case ((tag, _), (sum, count)) => (tag, sum / count)
+        .map({ // remove cluster index
+          case ((tag, _), (sum, count)) => (tag, (sum, count))
         })
 
-      val new_clusters: Map[HashTag, Array[ClusterCenter]] = ungrouped_clusters
-        .groupBy({ // transform Array[(Tag, Center)] to Array[Center]
+      val new_clusters_with_count: Map[HashTag, Array[(ClusterCenter, TweetCount)]] = ungrouped_clusters
+        .map({ // compute mean likes
+          case (tag, (sum, count)) => (tag, (sum / count, count))
+        })
+        .groupBy({
           case (tag, _) => tag
         })
-        .mapValues((array) => array.map({case (_, center) => center}))
-        .mapValues((centers) => centers.sorted)
+        // transform Array[(Tag, (Center, Count))] to Array[(Center, Count)]
+        .mapValues((array) => array.map({case (_, (center, count)) => (center, count)}))
+        .mapValues((array) => array.sorted)
         // mapValues is not serializable, so we map it with identity it to
         // make it serializable (see https://stackoverflow.com/a/32910318)
+        .map(identity)
+
+      val new_clusters: Map[HashTag, Array[ClusterCenter]] = new_clusters_with_count
+        // keep only the centers
+        .mapValues((array) => array.map({case (center, _) => center}))
+        .map(identity)
+
+      cluster_sizes = new_clusters_with_count
+        // keep only the sizes
+        .mapValues((array) => array.map({case (_, count) => count}))
         .map(identity)
 
 
@@ -277,20 +292,16 @@ object Twitter {
         .sum
 
       if(i % 10 == 1 || cluster_distance <= EPS){
-        print("Iteration ")
-        print(i)
-        print(" distance ")
-        println(cluster_distance)
+        println("Iteration " + i.toString + " distance " + cluster_distance.toString)
       }
 
-
       clusters = new_clusters
-
     }
 
     println("Clusters: ")
     clusters.foreach({case (hashtag, centers) => {
-      println(hashtag.toString + " " + centers.mkString(","))
+      println(hashtag.toString + " (centers) " + centers.mkString(","))
+      println(hashtag.toString + " (sizes) " + cluster_sizes(hashtag).mkString(","))
     }})
 
   }
