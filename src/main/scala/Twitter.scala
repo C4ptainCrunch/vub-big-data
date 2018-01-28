@@ -96,49 +96,9 @@ object Twitter {
     raw_tweets.map(raw_to_tweet)
   }
 
-  def basicGetTrending(unique_tag_likes: RDD[(HashTag, LikesCount)]): Array[HashTag] = {
-    unique_tag_likes
-        .sortBy({ case (_, likes) => likes }, ascending = false)
-      .take(TOPN)
-      .map({ case (tag, _) => tag })
-  }
-
-  def partitionedGetTrending(unique_tag_likes: RDD[(HashTag, LikesCount)]): Array[HashTag] = {
-    unique_tag_likes
-      .mapPartitions(partition => {
-        // Inspired from https://stackoverflow.com/a/5675204
-        // We should not use a list as we have to sort it every time
-        // something like https://docs.python.org/3.6/library/bisect.html
-        // would be better
-        partition.foldLeft(List[(HashTag, LikesCount)]()) { (l, n) => {
-          (n :: l).sortWith(_._2 > _._2).take(TOPN)
-        }
-        }.iterator
-      })
-      .sortBy({ case (_, likes) => likes }, ascending = false)
-      .take(TOPN)
-      .map({ case (tag, _) => tag })
-  }
-
-  def stdlibGetTrending(unique_tag_likes: RDD[(HashTag, LikesCount)]): Array[HashTag] = {
+  def getTrending(unique_tag_likes: RDD[(HashTag, LikesCount)]): Array[HashTag] = {
     unique_tag_likes
       .top(TOPN)(Ordering.by[(HashTag, LikesCount), LikesCount](_._2))
-      .map({ case (tag, _) => tag })
-  }
-
-  def fastGetTrending(unique_tag_likes: RDD[(HashTag, LikesCount)]): Array[HashTag] = {
-    // Sort faster by removing the most insignificant hashtags first
-    // We take 100 random hashtags and take the minimum like count. This like count is
-    // obviously > than the like count of the 20th trending hashtag
-    val lower_bound: LikesCount = unique_tag_likes.takeSample(withReplacement = false, num = 100)
-      .map(pair => pair._2)
-      .sorted
-      .reverse(TOPN)
-
-    unique_tag_likes
-      .filter({ case (_, likes) => likes > lower_bound})
-      .sortBy({ case (_, likes) => likes})
-      .take(TOPN)
       .map({ case (tag, _) => tag })
   }
 
@@ -206,10 +166,9 @@ object Twitter {
     val tag_likes: RDD[(HashTag, LikesCount)] = getHashtagsLikes(sc, spark, config)
       .persist()
     val unique_tag_likes: RDD[(HashTag, LikesCount)] = tag_likes.reduceByKey(_ + _)
-    val trending: Array[HashTag] = stdlibGetTrending(unique_tag_likes)
+    val trending: Array[HashTag] = getTrending(unique_tag_likes)
 
     println("Trending tags: " + trending.mkString(","))
-
 
     // Extract the tweets that have at least a trending hashtag
     val trending_set: Set[HashTag] = trending.toSet
