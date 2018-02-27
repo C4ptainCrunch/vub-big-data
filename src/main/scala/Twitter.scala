@@ -122,7 +122,7 @@ object Twitter {
       if(config.use_cache) {
         val path: Path = Path (config.cache_path)
         Try(path.deleteRecursively())
-
+        tag_likes.persist()
         tag_likes.saveAsObjectFile(config.cache_path) // Cache on disk for future runs
       }
 
@@ -174,6 +174,7 @@ object Twitter {
     val trending_set: Set[HashTag] = trending.toSet
     val trending_tweets: RDD[(HashTag, LikesCount)] = tag_likes
       .filter({ case (tag, _) => trending_set contains tag})
+      .repartition(355) // 5 partitions per CPU
       .persist()
 
     print("Amount of tweets with a trending hashtag: ")
@@ -190,7 +191,7 @@ object Twitter {
     for (i <- 1 to MAX_ITER; if cluster_distance > EPS) {
 
       // Assign each tweet the closest cluster center
-      var clustered_tweets: RDD[((HashTag, ClusterIndex), LikesCount)] = trending_tweets
+      val clustered_tweets: RDD[((HashTag, ClusterIndex), LikesCount)] = trending_tweets
         .map({ case (tag, likes) => {
           // Get the clusters list for this hashtag
           val tag_clusters: Array[ClusterCenter] = clusters.get(tag) match {
